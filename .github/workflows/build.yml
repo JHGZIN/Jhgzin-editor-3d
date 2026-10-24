@@ -1,27 +1,123 @@
 name: Build APK
+
 on:
   workflow_dispatch:
   push:
     branches: [main, master]
+
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Preparar Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
-      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Preparar Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Preparar Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 8.7
-      - name: Install Android SDK
+          gradle-version: '8.7'
+
+      - name: Instalar componentes Android
         run: sdkmanager "platforms;android-34" "build-tools;34.0.0"
-      - name: Build APK
-        run: gradle assembleDebug --no-daemon
-      - name: Upload APK
+
+      - name: Localizar e extrair projeto
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ -f "JH-Model-Studio.zip" ]; then
+            echo "ZIP encontrado na raiz. Extraindo..."
+            unzip -oq "JH-Model-Studio.zip" -d extracted-project
+          elif [ -f "JHModelStudio.zip" ]; then
+            echo "ZIP alternativo encontrado. Extraindo..."
+            unzip -oq "JHModelStudio.zip" -d extracted-project
+          else
+            echo "::error::Não encontrei JH-Model-Studio.zip nem JHModelStudio.zip na raiz do repositório."
+            echo "Arquivos disponíveis:"
+            find . -maxdepth 3 -type f | sort | head -200
+            exit 1
+          fi
+
+          # O ZIP atual contém a pasta JHModelStudio/ no seu interior.
+          if [ -f "extracted-project/JHModelStudio/settings.gradle.kts" ]; then
+            PROJECT_DIR="extracted-project/JHModelStudio"
+          elif [ -f "extracted-project/settings.gradle.kts" ]; then
+            PROJECT_DIR="extracted-project"
+          else
+            echo "::error::Não encontrei settings.gradle.kts dentro do ZIP. Confira a estrutura do projeto."
+            find extracted-project -maxdepth 5 -type f | sort | head -250
+            exit 1
+          fi
+
+          if [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
+            echo "::error::Não encontrei app/build.gradle.kts em $PROJECT_DIR."
+            find "$PROJECT_DIR" -maxdepth 5 -type f | sort | head -250
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Projeto encontrado em: $PROJECT_DIR"
+          echo "Arquivos principais:"
+          ls -la "$PROJECT_DIR"
+
+      - name: Compilar APK de depuração
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$PROJECT_DIR"
+          gradle assembleDebug --no-daemon --stacktrace --warning-mode all 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+
+      - name: Verificar APK gerado
+        if: success()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -f "$APK" ]; then
+            echo "::error::A compilação terminou, mas o APK não foi encontrado em: $APK"
+            find "$PROJECT_DIR/app/build/outputs" -type f 2>/dev/null || true
+            exit 1
+          fi
+          mkdir -p output
+          cp "$APK" output/JH-Model-Studio.apk
+          ls -lh output/JH-Model-Studio.apk
+
+      - name: Mostrar diagnóstico em caso de erro
+        if: failure()
+        shell: bash
+        run: |
+          echo "===== DIAGNÓSTICO DA COMPILAÇÃO ====="
+          if [ -f build.log ]; then
+            tail -n 250 build.log
+          else
+            echo "O build.log não foi criado. Verifique as etapas anteriores."
+          fi
+          echo "===== ESTRUTURA DO REPOSITÓRIO ====="
+          find . -maxdepth 5 -type f | sort | head -300
+
+      - name: Enviar APK como artefato
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: JH-Model-Studio-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: output/JH-Model-Studio.apk
+          if-no-files-found: error
+
+      - name: Enviar log da compilação em caso de falha
+        if: failure() && hashFiles('build.log') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: JH-Model-Studio-build-log
+          path: build.log
+          if-no-files-found: warn
